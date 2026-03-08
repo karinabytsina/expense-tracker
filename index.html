@@ -547,18 +547,38 @@
 
     function detectBank(headers) {
       const h = headers.join(",").toLowerCase();
-      if (h.includes("started date") && h.includes("balance")) return "revolut";
+      if (h.includes("started date") && h.includes("balance")) return "revolut_en";
+      if (h.includes("datum zahájení") || h.includes("částka") && h.includes("popis")) return "revolut_cz";
       if (h.includes("datum") && h.includes("objem") && h.includes("protiúčet")) return "raiffeisenbank_cz";
       if (h.includes("дата операции") || h.includes("дата проводки")) return "homecredit_kz";
       if (h.includes("transaction date") && h.includes("debit") && h.includes("credit") && h.includes("balance")) return "generic_debit_credit";
       return null;
     }
 
-    function parseRevolut(rows, accountId) {
-      return rows.filter(r => r["State"] === "COMPLETED").map(r => {
-        const amount = parseFloat(r["Amount"]);
+    function parseRevolut(rows, accountId, opts = {}) {
+      const { czech } = opts;
+      const completedVal = czech ? "DOKONČENO" : "COMPLETED";
+      const dateKey     = czech ? "Datum dokončení"  : "Completed Date";
+      const fallbackKey = czech ? "Datum zahájení"   : "Started Date";
+      const amountKey   = czech ? "Částka"           : "Amount";
+      const feeKey      = czech ? "Poplatek"         : "Fee";
+      const currencyKey = czech ? "Měna"             : "Currency";
+      const descKey     = czech ? "Popis"            : "Description";
+      const stateKey    = czech ? "State"            : "State";
+
+      return rows.filter(r => r[stateKey] === completedVal).map(r => {
+        const amount = parseFloat(r[amountKey]);
+        const fee    = parseFloat(r[feeKey] || "0") || 0;
         if (isNaN(amount)) return null;
-        return { id: uid(), date: r["Completed Date"]?.slice(0, 10) || r["Started Date"]?.slice(0, 10), accountId, type: amount >= 0 ? "income" : "expense", amount: Math.abs(amount), currency: r["Currency"], note: r["Description"] || "", category: "", createdAt: Date.now(), _imported: true };
+        const date = r[dateKey]?.slice(0, 10) || r[fallbackKey]?.slice(0, 10);
+        const note = [r[descKey], fee > 0 ? `fee: ${fee}` : ""].filter(Boolean).join(" · ");
+        return {
+          id: uid(), date, accountId,
+          type: amount >= 0 ? "income" : "expense",
+          amount: Math.abs(amount),
+          currency: r[currencyKey],
+          note, category: "", createdAt: Date.now(), _imported: true,
+        };
       }).filter(Boolean);
     }
 
@@ -605,7 +625,9 @@
         if (!rows.length) { setError("No rows found in file."); return; }
         const bank = detectBank(Object.keys(rows[0]));
         let parsed = [];
-        if (bank === "revolut") parsed = parseRevolut(rows, accountId);
+        if (bank === "revolut_en") parsed = parseRevolut(rows, accountId, { czech: false });
+        else if (bank === "revolut_cz") parsed = parseRevolut(rows, accountId, { czech: true });
+        else if (bank === "revolut_savings") parsed = parseRevolutSavings(rows, accountId);
         else if (bank === "raiffeisenbank_cz") parsed = parseRaiffeisenCZ(rows, accountId);
         else if (bank === "generic_debit_credit") parsed = parseGenericDebitCredit(rows, accountId, acc?.currency || "KZT");
         else { setError(`Unknown CSV format. Headers: ${Object.keys(rows[0]).join(", ")}`); return; }
@@ -672,7 +694,7 @@
           <div style={s.divider} />
           <div style={{ fontSize: 11, color: C.muted }}>
             <strong style={{ color: C.text }}>Supported formats:</strong><br />
-            • Revolut (CSV export from app)<br />
+            • Revolut — English and Czech exports<br />
             • Raiffeisenbank CZ (CSV from internet banking)<br />
             • Generic KZ banks with Debit/Credit columns<br />
           </div>
