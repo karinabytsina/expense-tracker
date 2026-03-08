@@ -1,0 +1,1039 @@
+import { useState, useEffect, useCallback } from "react";
+
+// ── IN-MEMORY STORE ───────────────────────────────────────────────────────────
+const memDB = { transactions: {}, settings: {} };
+const dbGet    = async (store, key) => memDB[store][key] ?? null;
+const dbPut    = async (store, key, value) => { memDB[store][store === "settings" ? key : value.id] = store === "settings" ? value : value; };
+const dbGetAll = async (store) => Object.values(memDB[store]);
+const dbDelete = async (store, key) => { delete memDB[store][key]; };
+
+// ── CONSTANTS ─────────────────────────────────────────────────────────────────
+const CURRENCIES = ["EUR", "CZK", "USD", "KZT"];
+const TX_TYPES   = ["expense", "income", "move", "conversion"];
+
+const DEFAULT_ACCOUNTS = [
+  { id: "a1",  name: "Raiffeisenbank CZ",  currency: "CZK", color: "#4f8ef7" },
+  { id: "a2",  name: "Raiffeisenbank EUR",  currency: "EUR", color: "#4f8ef7" },
+  { id: "a3",  name: "Revolut EUR",         currency: "EUR", color: "#6c63ff" },
+  { id: "a4",  name: "Revolut USD",         currency: "USD", color: "#6c63ff" },
+  { id: "a5",  name: "Revolut CZK",         currency: "CZK", color: "#6c63ff" },
+  { id: "a6",  name: "HomeCreditBank KZ",   currency: "KZT", color: "#f7a44f" },
+  { id: "a7",  name: "Freedom KZ",          currency: "KZT", color: "#f7a44f" },
+  { id: "a8",  name: "Halyk Business",      currency: "KZT", color: "#4fbe8e" },
+  { id: "a9",  name: "BCC Business",        currency: "KZT", color: "#e05c5c" },
+  { id: "a10", name: "Cash EUR",            currency: "EUR", color: "#aaa" },
+  { id: "a11", name: "Cash CZK",            currency: "CZK", color: "#aaa" },
+  { id: "a12", name: "Cash KZT",            currency: "KZT", color: "#aaa" },
+  { id: "a13", name: "DIP Raiffeisenbank",  currency: "CZK", color: "#4f8ef7" },
+];
+
+const DEFAULT_EXP_CATS = ["Food & Groceries","Rent & Housing","Transport","Utilities","Health","Entertainment","Clothing","Travel","Restaurants","Education","Subscriptions","Other"];
+const DEFAULT_INC_CATS = ["Salary","Freelance","Business","Dividends","Interest","Gift","Tax Return","Other"];
+
+const FALLBACK_RATES = { EUR: 1, CZK: 0.04167, USD: 1.08, KZT: 0.00196 };
+
+const PERIOD_PRESETS = [
+  ["this_month","This Month"],["last_month","Last Month"],["last_30","Last 30 Days"],
+  ["this_year","This Year"],["last_year","Last Year"],["last_12m","Last 12 Months"],["custom","Custom"],
+];
+
+// ── HELPERS ───────────────────────────────────────────────────────────────────
+const uid    = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+const toEUR  = (amount, currency) => amount * (FALLBACK_RATES[currency] || 1);
+const fmt    = (n, cur) => n == null ? "—" : new Intl.NumberFormat("en-US", { style: "currency", currency: cur, maximumFractionDigits: 2 }).format(n);
+const fmtDate = d => new Date(d).toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
+
+function periodDates(preset, custom) {
+  const now = new Date(), y = now.getFullYear(), m = now.getMonth();
+  switch (preset) {
+    case "this_month":  return [new Date(y, m, 1),      new Date(y, m + 1, 0)];
+    case "last_month":  return [new Date(y, m - 1, 1),  new Date(y, m, 0)];
+    case "last_30":     return [new Date(now - 30 * 86400000), now];
+    case "this_year":   return [new Date(y, 0, 1),      new Date(y, 11, 31)];
+    case "last_year":   return [new Date(y - 1, 0, 1),  new Date(y - 1, 11, 31)];
+    case "last_12m":    return [new Date(y, m - 12, 1), now];
+    case "custom":      return [new Date(custom[0]),     new Date(custom[1])];
+    default:            return [new Date(y, m, 1),      now];
+  }
+}
+
+async function fetchRate(from, to) {
+  try {
+    const r = await fetch(`https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1/currencies/${from.toLowerCase()}.json`);
+    const data = await r.json();
+    return data[from.toLowerCase()][to.toLowerCase()];
+  } catch {
+    return FALLBACK_RATES[from] / FALLBACK_RATES[to];
+  }
+}
+
+// ── STYLES ────────────────────────────────────────────────────────────────────
+const C = {
+  bg: "#0f0f0f", card: "#1a1a1a", border: "#2a2a2a",
+  text: "#f0f0f0", muted: "#888", accent: "#4f8ef7",
+  green: "#4fbe8e", red: "#e05c5c", yellow: "#f7c44f",
+};
+
+const s = {
+  app:    { minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'Inter', system-ui, sans-serif", fontSize: 14 },
+  nav:    { display: "flex", background: C.card, borderBottom: `1px solid ${C.border}`, padding: "0 16px", overflowX: "auto" },
+  navBtn: active => ({ padding: "14px 16px", background: "none", border: "none", color: active ? C.accent : C.muted, cursor: "pointer", fontSize: 13, fontWeight: active ? 600 : 400, borderBottom: active ? `2px solid ${C.accent}` : "2px solid transparent", whiteSpace: "nowrap" }),
+  page:   { maxWidth: 680, margin: "0 auto", padding: "20px 16px" },
+  card:   { background: C.card, borderRadius: 12, border: `1px solid ${C.border}`, padding: 16, marginBottom: 12 },
+  h2:     { margin: "0 0 16px", fontSize: 18, fontWeight: 600 },
+  h3:     { margin: "0 0 10px", fontSize: 14, fontWeight: 600, color: C.muted },
+  row:    { display: "flex", gap: 10, alignItems: "center" },
+  label:  { display: "block", fontSize: 12, color: C.muted, marginBottom: 4 },
+  input:  { width: "100%", background: "#111", border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 12px", color: C.text, fontSize: 14, boxSizing: "border-box", outline: "none" },
+  select: { width: "100%", background: "#111", border: `1px solid ${C.border}`, borderRadius: 8, padding: "9px 12px", color: C.text, fontSize: 14, boxSizing: "border-box", outline: "none" },
+  btn:    (v = "primary") => ({ padding: "10px 18px", borderRadius: 8, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600, background: v === "primary" ? C.accent : v === "danger" ? C.red : "#2a2a2a", color: v === "ghost" ? C.muted : "#fff" }),
+  chip:   color => ({ display: "inline-block", padding: "2px 8px", borderRadius: 20, fontSize: 11, fontWeight: 600, background: color + "22", color }),
+  badge:  color => ({ width: 8, height: 8, borderRadius: "50%", background: color, display: "inline-block", marginRight: 6 }),
+  divider:{ borderTop: `1px solid ${C.border}`, margin: "12px 0" },
+  txRow:  { display: "flex", justifyContent: "space-between", alignItems: "flex-start", padding: "10px 0", borderBottom: `1px solid ${C.border}` },
+  grid2:  { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 },
+};
+
+// ── SMALL COMPONENTS ──────────────────────────────────────────────────────────
+const Field = ({ label, children }) => (
+  <div style={{ marginBottom: 12 }}>
+    <label style={s.label}>{label}</label>
+    {children}
+  </div>
+);
+
+const TypeBadge = ({ type }) => {
+  const map = { expense: [C.red, "Expense"], income: [C.green, "Income"], move: [C.accent, "Move"], conversion: [C.yellow, "Conversion"] };
+  const [color, text] = map[type] || [C.muted, type];
+  return <span style={s.chip(color)}>{text}</span>;
+};
+
+// ── CSV PARSING ───────────────────────────────────────────────────────────────
+function parseCSVLine(line) {
+  const res = []; let cur = "", inQ = false;
+  for (const ch of line) {
+    if (ch === '"')           inQ = !inQ;
+    else if (ch === ',' && !inQ) { res.push(cur.trim()); cur = ""; }
+    else                      cur += ch;
+  }
+  res.push(cur.trim());
+  return res;
+}
+
+function parseCSV(text) {
+  const lines = text.trim().split(/\r?\n/).filter(l => l.trim());
+  const headers = parseCSVLine(lines[0]).map(h => h.replace(/^"|"$/g, "").trim());
+  return lines.slice(1).map(l => {
+    const vals = parseCSVLine(l);
+    return Object.fromEntries(headers.map((h, i) => [h, (vals[i] || "").replace(/^"|"$/g, "").trim()]));
+  });
+}
+
+function detectBank(headers) {
+  const h = headers.map(x => x.trim()).join(",").toLowerCase();
+  if (h.includes("started date") && h.includes("balance"))                       return "revolut_en";
+  if (h.includes("datum zah") || (h.includes("ástka") && h.includes("popis")))   return "revolut_cz";
+  if (h.includes("value, usd") && h.includes("fx rate") && h.includes("quantity")) return "revolut_savings";
+  if (h.includes("datum") && h.includes("objem") && h.includes("protiúčet"))     return "raiffeisenbank_cz";
+  if (h.includes("дата операции") || h.includes("дата проводки"))                return "homecredit_kz";
+  if (h.includes("transaction date") && h.includes("debit") && h.includes("credit") && h.includes("balance")) return "generic_debit_credit";
+  return null;
+}
+
+function parseRevolutSavings(rows, accountId) {
+  const parseAmt = str => {
+    if (!str) return NaN;
+    // handles "0,4087", "-0,1587", "-12 555,31" — European decimal comma + space thousands
+    return parseFloat(str.replace(/\s/g, "").replace(",", "."));
+  };
+  const parseDate = str => {
+    // "8. 3. 2026 1:22:13" → "2026-03-08"
+    const m = str?.match(/(\d+)\.\s*(\d+)\.\s*(\d{4})/);
+    if (!m) return str?.slice(0, 10) || "";
+    return `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+  };
+
+  return rows.map(r => {
+    const desc   = r["Description"] || "";
+    const amount = parseAmt(r["Value, USD"]);
+    if (isNaN(amount) || amount === 0) return null;
+
+    // Derive category hint from description prefix
+    let category = "";
+    if (desc.startsWith("Interest PAID"))        category = "Interest";
+    else if (desc.startsWith("Service Fee"))      category = "Subscriptions";
+    else if (desc.startsWith("SELL"))             category = "Dividends";
+    else if (desc.startsWith("BUY"))              category = "Other";
+
+    return {
+      id: uid(),
+      date: parseDate(r["Date"]),
+      accountId,
+      type: amount >= 0 ? "income" : "expense",
+      amount: Math.abs(amount),
+      currency: "USD",
+      note: desc,
+      category,
+      createdAt: Date.now(),
+      _imported: true,
+    };
+  }).filter(Boolean);
+}
+
+function parseRevolut(rows, accountId, czech = false) {
+  const K = {
+    state:    "State",
+    done:     czech ? "DOKONČENO"       : "COMPLETED",
+    date:     czech ? "Datum dokončení" : "Completed Date",
+    fallback: czech ? "Datum zahájení"  : "Started Date",
+    amount:   czech ? "Částka"          : "Amount",
+    fee:      czech ? "Poplatek"        : "Fee",
+    currency: czech ? "Měna"            : "Currency",
+    desc:     czech ? "Popis"           : "Description",
+  };
+  return rows.filter(r => r[K.state] === K.done).map(r => {
+    const amount = parseFloat(r[K.amount]);
+    if (isNaN(amount)) return null;
+    const fee  = parseFloat(r[K.fee] || "0") || 0;
+    const date = r[K.date]?.slice(0, 10) || r[K.fallback]?.slice(0, 10);
+    const note = [r[K.desc], fee > 0 ? `fee: ${fee}` : ""].filter(Boolean).join(" · ");
+    return { id: uid(), date, accountId, type: amount >= 0 ? "income" : "expense", amount: Math.abs(amount), currency: r[K.currency], note, category: "", createdAt: Date.now(), _imported: true };
+  }).filter(Boolean);
+}
+
+function parseRaiffeisenCZ(rows, accountId) {
+  return rows.map(r => {
+    const raw    = r["Objem"] || r["Amount"] || "";
+    const amount = parseFloat(raw.replace(/\s/g, "").replace(",", "."));
+    if (isNaN(amount)) return null;
+    const date = (r["Datum"] || r["Date"] || "");
+    const dateParsed = date.includes(".") ? date.split(".").reverse().join("-") : date.slice(0, 10);
+    return { id: uid(), date: dateParsed, accountId, type: amount >= 0 ? "income" : "expense", amount: Math.abs(amount), currency: r["Měna"] || r["Currency"] || "CZK", note: r["Zpráva/Poznámka"] || r["Název protiúčtu"] || "", category: "", createdAt: Date.now(), _imported: true };
+  }).filter(Boolean);
+}
+
+function parseGenericDebitCredit(rows, accountId, currency) {
+  return rows.map(r => {
+    const keys      = Object.keys(r);
+    const debitKey  = keys.find(k => k.toLowerCase().includes("debit")  || k.toLowerCase().includes("расход"));
+    const creditKey = keys.find(k => k.toLowerCase().includes("credit") || k.toLowerCase().includes("приход") || k.toLowerCase().includes("зачисл"));
+    const dateKey   = keys.find(k => k.toLowerCase().includes("date")   || k.toLowerCase().includes("дата"));
+    const noteKey   = keys.find(k => k.toLowerCase().includes("description") || k.toLowerCase().includes("назначение") || k.toLowerCase().includes("примечание") || k.toLowerCase().includes("note"));
+    const debit  = parseFloat((r[debitKey]  || "0").replace(/\s/g, "").replace(",", ".")) || 0;
+    const credit = parseFloat((r[creditKey] || "0").replace(/\s/g, "").replace(",", ".")) || 0;
+    if (!debit && !credit) return null;
+    const rawDate = r[dateKey] || "";
+    const date    = rawDate.includes(".") ? rawDate.split(".").reverse().join("-") : rawDate.slice(0, 10);
+    return { id: uid(), date, accountId, type: credit > 0 ? "income" : "expense", amount: credit > 0 ? credit : debit, currency, note: r[noteKey] || "", category: "", createdAt: Date.now(), _imported: true };
+  }).filter(Boolean);
+}
+
+function parseBank(bank, rows, accountId, currency) {
+  switch (bank) {
+    case "revolut_en":           return parseRevolut(rows, accountId, false);
+    case "revolut_cz":           return parseRevolut(rows, accountId, true);
+    case "revolut_savings":      return parseRevolutSavings(rows, accountId);
+    case "raiffeisenbank_cz":    return parseRaiffeisenCZ(rows, accountId);
+    case "generic_debit_credit": return parseGenericDebitCredit(rows, accountId, currency);
+    default: return null;
+  }
+}
+
+const BANK_LABELS = {
+  revolut_en:           "Revolut (English)",
+  revolut_cz:           "Revolut (Czech)",
+  raiffeisenbank_cz:    "Raiffeisenbank CZ",
+  generic_debit_credit: "Generic (Debit/Credit columns)",
+};
+
+// ── GOOGLE DRIVE ──────────────────────────────────────────────────────────────
+const DRIVE_SCOPE     = "https://www.googleapis.com/auth/drive.appdata";
+const DRIVE_FILE_NAME = "finance-tracker.json";
+
+function useGoogleDrive() {
+  const [status, setStatus] = useState("idle");
+  const [token,  setToken]  = useState(null);
+  const [msg,    setMsg]    = useState("");
+
+  function connect(clientId) {
+    if (!clientId) { setMsg("Enter your Google OAuth Client ID first."); return; }
+    setStatus("connecting"); setMsg("Waiting for Google sign-in…");
+    const redirectUri = window.location.origin + window.location.pathname;
+    const params = new URLSearchParams({ client_id: clientId, redirect_uri: redirectUri, response_type: "token", scope: DRIVE_SCOPE, prompt: "select_account" });
+    const popup = window.open(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, "oauth", "width=500,height=600");
+    let resolved = false;
+    const ERROR_MSGS = {
+      access_denied:        "Access denied — you cancelled or denied permission.",
+      redirect_uri_mismatch:"Redirect URI mismatch — check Authorized redirect URIs in Google Cloud.",
+      org_internal:         "App is restricted to internal users — set OAuth consent screen to External.",
+      invalid_client:       "Invalid Client ID — double-check the value in Settings.",
+    };
+    const timer = setInterval(() => {
+      try {
+        const url = popup?.location?.href || "";
+        if (url.includes("access_token")) {
+          resolved = true; clearInterval(timer); popup.close();
+          const hash = new URLSearchParams(url.split("#")[1]);
+          const err  = hash.get("error"), tok = hash.get("access_token");
+          if (err) { setStatus("idle"); setMsg(ERROR_MSGS[err] || `Auth error: ${err}`); }
+          else if (tok) { setToken(tok); setStatus("connected"); setMsg("Connected to Google Drive ✓"); }
+          return;
+        }
+        if (url.includes("accounts.google.com") && url.includes("error=")) {
+          resolved = true; clearInterval(timer);
+          const errParam = new URLSearchParams(url.split("?")[1]).get("error");
+          popup.close(); setStatus("idle"); setMsg(ERROR_MSGS[errParam] || `Google error: ${errParam}`);
+          return;
+        }
+      } catch {}
+      if (popup?.closed && !resolved) { clearInterval(timer); setStatus("idle"); setMsg("Sign-in window closed — please try again."); }
+    }, 300);
+  }
+
+  async function findFile(tok) {
+    const r = await fetch("https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&fields=files(id,name,modifiedTime)&q=name%3D%27finance-tracker.json%27", { headers: { Authorization: `Bearer ${tok}` } });
+    return (await r.json()).files?.[0] || null;
+  }
+
+  async function push(data) {
+    if (!token) { setMsg("Not connected."); return; }
+    setMsg("Pushing to Drive…");
+    try {
+      const payload  = JSON.stringify({ ...data, exportedAt: new Date().toISOString() });
+      const existing = await findFile(token);
+      let url, method;
+      if (existing) {
+        url = `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media`; method = "PATCH";
+      } else {
+        const meta = await fetch("https://www.googleapis.com/drive/v3/files", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ name: DRIVE_FILE_NAME, parents: ["appDataFolder"] }) });
+        url = `https://www.googleapis.com/upload/drive/v3/files/${(await meta.json()).id}?uploadType=media`; method = "PATCH";
+      }
+      await fetch(url, { method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: payload });
+      setMsg(`Pushed to Drive at ${new Date().toLocaleString()}`);
+    } catch (e) { setMsg("Push failed: " + e.message); }
+  }
+
+  async function pull() {
+    if (!token) { setMsg("Not connected."); return null; }
+    setMsg("Pulling from Drive…");
+    try {
+      const existing = await findFile(token);
+      if (!existing) { setMsg("No file found on Drive yet."); return null; }
+      const data = await (await fetch(`https://www.googleapis.com/drive/v3/files/${existing.id}?alt=media`, { headers: { Authorization: `Bearer ${token}` } })).json();
+      setMsg(`Pulled from Drive (saved ${new Date(data.exportedAt).toLocaleString()})`);
+      return data;
+    } catch (e) { setMsg("Pull failed: " + e.message); return null; }
+  }
+
+  return { status, connect, push, pull, msg };
+}
+
+// ── ADD TRANSACTION ───────────────────────────────────────────────────────────
+function AddTransaction({ accounts, expCats, incCats, onSave }) {
+  const today = new Date().toISOString().slice(0, 10);
+  const empty = { type: "expense", date: today, accountId: accounts[0]?.id || "", toAccountId: "", amount: "", toCurrency: "", toAmount: "", rate: "", category: "", note: "" };
+  const [f, setF]               = useState(empty);
+  const [loading, setLoading]   = useState(false);
+  const [fetchingRate, setFR]   = useState(false);
+
+  const set      = k => e => setF(p => ({ ...p, [k]: e.target.value }));
+  const fromAcc  = accounts.find(a => a.id === f.accountId);
+  const toAcc    = accounts.find(a => a.id === f.toAccountId);
+  const needsRate = (f.type === "move" || f.type === "conversion") && fromAcc && ((toAcc && fromAcc.currency !== toAcc.currency) || f.toCurrency);
+
+  useEffect(() => {
+    if (f.type === "move" && fromAcc && toAcc && fromAcc.currency !== toAcc.currency)
+      fetchRate(fromAcc.currency, toAcc.currency).then(r => setF(p => ({ ...p, rate: r.toFixed(6) })));
+  }, [f.toAccountId, f.accountId, f.type]);
+
+  async function autoRate() {
+    if (!fromAcc || !f.toCurrency) return;
+    setFR(true);
+    const r = await fetchRate(fromAcc.currency, f.toCurrency);
+    setF(p => ({ ...p, rate: r.toFixed(6) }));
+    setFR(false);
+  }
+
+  async function submit() {
+    if (!f.amount || !f.accountId) return;
+    setLoading(true);
+    const tx = { ...f, id: uid(), amount: parseFloat(f.amount), toAmount: f.toAmount ? parseFloat(f.toAmount) : null, rate: f.rate ? parseFloat(f.rate) : null, createdAt: Date.now() };
+    await dbPut("transactions", tx.id, tx);
+    onSave(tx);
+    setF({ ...empty, date: f.date });
+    setLoading(false);
+  }
+
+  const cats = f.type === "expense" ? expCats : f.type === "income" ? incCats : [];
+
+  return (
+    <div style={s.card}>
+      <h2 style={s.h2}>Add Transaction</h2>
+      <Field label="Type">
+        <div style={{ display: "flex", gap: 6 }}>
+          {TX_TYPES.map(t => (
+            <button key={t} onClick={() => setF(p => ({ ...p, type: t }))}
+              style={{ ...s.btn(f.type === t ? "primary" : "ghost"), flex: 1, padding: "8px 4px", fontSize: 12, textTransform: "capitalize" }}>{t}</button>
+          ))}
+        </div>
+      </Field>
+      <div style={s.grid2}>
+        <Field label="Date"><input type="date" style={s.input} value={f.date} onChange={set("date")} /></Field>
+        <Field label="From Account">
+          <select style={s.select} value={f.accountId} onChange={set("accountId")}>
+            {accounts.map(a => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
+          </select>
+        </Field>
+      </div>
+      {(f.type === "move" || f.type === "conversion") && (
+        <Field label="To Account">
+          <select style={s.select} value={f.toAccountId} onChange={set("toAccountId")}>
+            <option value="">— select —</option>
+            {accounts.filter(a => a.id !== f.accountId).map(a => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
+          </select>
+        </Field>
+      )}
+      <div style={s.grid2}>
+        <Field label={`Amount (${fromAcc?.currency || ""})`}>
+          <input type="number" style={s.input} placeholder="0.00" value={f.amount} onChange={set("amount")} />
+        </Field>
+        {(f.type === "move" || f.type === "conversion") && toAcc && fromAcc?.currency !== toAcc?.currency && (
+          <Field label={`Received (${toAcc.currency})`}>
+            <input type="number" style={s.input} placeholder="0.00" value={f.toAmount} onChange={set("toAmount")} />
+          </Field>
+        )}
+      </div>
+      {f.type === "conversion" && !f.toAccountId && (
+        <div style={s.grid2}>
+          <Field label="To Currency">
+            <select style={s.select} value={f.toCurrency} onChange={set("toCurrency")}>
+              <option value="">— select —</option>
+              {CURRENCIES.filter(c => c !== fromAcc?.currency).map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          </Field>
+          <Field label="Received Amount">
+            <input type="number" style={s.input} placeholder="0.00" value={f.toAmount} onChange={set("toAmount")} />
+          </Field>
+        </div>
+      )}
+      {needsRate && (
+        <Field label={`Exchange Rate (1 ${fromAcc.currency} = ? ${toAcc?.currency || f.toCurrency})`}>
+          <div style={s.row}>
+            <input type="number" style={s.input} placeholder="auto" value={f.rate} onChange={set("rate")} />
+            <button style={{ ...s.btn("ghost"), whiteSpace: "nowrap", fontSize: 12 }} onClick={autoRate} disabled={fetchingRate}>
+              {fetchingRate ? "…" : "↺ Fetch"}
+            </button>
+          </div>
+        </Field>
+      )}
+      {cats.length > 0 && (
+        <Field label="Category">
+          <select style={s.select} value={f.category} onChange={set("category")}>
+            <option value="">— uncategorized —</option>
+            {cats.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </Field>
+      )}
+      <Field label="Note (optional)">
+        <input style={s.input} placeholder="Description…" value={f.note} onChange={set("note")} />
+      </Field>
+      <button style={{ ...s.btn("primary"), width: "100%", padding: 12 }} onClick={submit} disabled={loading}>
+        {loading ? "Saving…" : "Save Transaction"}
+      </button>
+    </div>
+  );
+}
+
+// ── ACCOUNTS VIEW ─────────────────────────────────────────────────────────────
+function AccountsView({ accounts, transactions }) {
+  const balances = Object.fromEntries(accounts.map(a => [a.id, 0]));
+  transactions.forEach(tx => {
+    if (tx.type === "income")  balances[tx.accountId] += tx.amount;
+    if (tx.type === "expense") balances[tx.accountId] -= tx.amount;
+    if (tx.type === "move" || tx.type === "conversion") {
+      balances[tx.accountId] -= tx.amount;
+      if (tx.toAccountId) balances[tx.toAccountId] += (tx.toAmount || tx.amount);
+    }
+  });
+  const totalEUR = accounts.reduce((sum, a) => sum + toEUR(balances[a.id] || 0, a.currency), 0);
+  const grouped  = CURRENCIES.map(cur => ({ cur, accs: accounts.filter(a => a.currency === cur) })).filter(g => g.accs.length);
+
+  return (
+    <div>
+      <div style={{ ...s.card, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div>
+          <div style={s.h3}>Total Net Worth</div>
+          <div style={{ fontSize: 28, fontWeight: 700 }}>{fmt(totalEUR, "EUR")}</div>
+        </div>
+        <div style={{ textAlign: "right", color: C.muted, fontSize: 12 }}>Approx. in EUR<br/>(static rates)</div>
+      </div>
+      {grouped.map(({ cur, accs }) => (
+        <div key={cur} style={s.card}>
+          <h3 style={s.h3}>{cur} Accounts</h3>
+          {accs.map(a => (
+            <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: `1px solid ${C.border}` }}>
+              <div style={s.row}><span style={s.badge(a.color)} /><span>{a.name}</span></div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontWeight: 600, color: (balances[a.id] || 0) >= 0 ? C.text : C.red }}>{fmt(balances[a.id] || 0, a.currency)}</div>
+                {a.currency !== "EUR" && <div style={{ fontSize: 11, color: C.muted }}>≈ {fmt(toEUR(balances[a.id] || 0, a.currency), "EUR")}</div>}
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── TRANSACTIONS LIST ─────────────────────────────────────────────────────────
+function TransactionsList({ transactions, accounts, onDelete }) {
+  const [search, setSearch] = useState("");
+  const accMap  = Object.fromEntries(accounts.map(a => [a.id, a]));
+  const filtered = transactions
+    .filter(tx => !search || tx.note?.toLowerCase().includes(search.toLowerCase()) || tx.category?.toLowerCase().includes(search.toLowerCase()))
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .slice(0, 100);
+
+  return (
+    <div>
+      <div style={s.card}>
+        <input style={s.input} placeholder="Search by note or category…" value={search} onChange={e => setSearch(e.target.value)} />
+      </div>
+      <div style={s.card}>
+        <h2 style={s.h2}>Recent Transactions</h2>
+        {filtered.length === 0 && <div style={{ color: C.muted, textAlign: "center", padding: 24 }}>No transactions yet</div>}
+        {filtered.map(tx => {
+          const acc    = accMap[tx.accountId];
+          const toAcc  = accMap[tx.toAccountId];
+          const color  = tx.type === "income" ? C.green : tx.type === "expense" ? C.red : C.accent;
+          const sign   = tx.type === "income" ? "+" : tx.type === "expense" ? "−" : "↔";
+          return (
+            <div key={tx.id} style={s.txRow}>
+              <div style={{ flex: 1 }}>
+                <div style={s.row}>
+                  <TypeBadge type={tx.type} />
+                  {tx.category && <span style={{ color: C.muted, fontSize: 12 }}>{tx.category}</span>}
+                </div>
+                <div style={{ marginTop: 4, color: C.muted, fontSize: 12 }}>
+                  {acc?.name}{toAcc ? ` → ${toAcc.name}` : ""} · {fmtDate(tx.date)}
+                </div>
+                {tx.note && <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{tx.note}</div>}
+              </div>
+              <div style={{ textAlign: "right" }}>
+                <div style={{ fontWeight: 600, color }}>{sign} {fmt(tx.amount, acc?.currency || "EUR")}</div>
+                {tx.toAmount && toAcc && <div style={{ fontSize: 11, color: C.muted }}>→ {fmt(tx.toAmount, toAcc.currency)}</div>}
+                {tx.type !== "expense" && acc?.currency !== "EUR" && <div style={{ fontSize: 11, color: C.muted }}>≈ {fmt(toEUR(tx.amount, acc?.currency), "EUR")}</div>}
+                <button onClick={() => onDelete(tx.id)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer", fontSize: 11, marginTop: 2 }}>✕</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── REPORTS ───────────────────────────────────────────────────────────────────
+function Reports({ transactions, accounts, expCats, incCats }) {
+  const [preset, setPreset]   = useState("this_month");
+  const [custom, setCustom]   = useState(["", ""]);
+  const [selAccs, setSelAccs] = useState([]);
+  const [selTypes, setSelTypes] = useState([]);
+  const accMap = Object.fromEntries(accounts.map(a => [a.id, a]));
+  const [from, to] = periodDates(preset, custom);
+
+  const filtered = transactions.filter(tx => {
+    const d = new Date(tx.date);
+    if (d < from || d > to) return false;
+    if (selAccs.length  && !selAccs.includes(tx.accountId)) return false;
+    if (selTypes.length && !selTypes.includes(tx.type))     return false;
+    return true;
+  });
+
+  const totalIncome  = filtered.filter(t => t.type === "income") .reduce((s, t) => s + toEUR(t.amount, accMap[t.accountId]?.currency || "EUR"), 0);
+  const totalExpense = filtered.filter(t => t.type === "expense").reduce((s, t) => s + toEUR(t.amount, accMap[t.accountId]?.currency || "EUR"), 0);
+  const kztIncome    = filtered.filter(t => t.type === "income"  && accMap[t.accountId]?.currency === "KZT").reduce((s, t) => s + t.amount, 0);
+  const kztExpense   = filtered.filter(t => t.type === "expense" && accMap[t.accountId]?.currency === "KZT").reduce((s, t) => s + t.amount, 0);
+
+  const byCategory = {};
+  filtered.filter(t => t.type === "expense").forEach(t => {
+    const cat = t.category || "Uncategorized";
+    byCategory[cat] = (byCategory[cat] || 0) + toEUR(t.amount, accMap[t.accountId]?.currency || "EUR");
+  });
+  const catList = Object.entries(byCategory).sort((a, b) => b[1] - a[1]);
+  const maxCat  = catList[0]?.[1] || 1;
+
+  const toggle = (arr, setArr, val) => setArr(arr.includes(val) ? arr.filter(x => x !== val) : [...arr, val]);
+
+  return (
+    <div>
+      <div style={s.card}>
+        <h3 style={s.h3}>Time Period</h3>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+          {PERIOD_PRESETS.map(([k, l]) => (
+            <button key={k} onClick={() => setPreset(k)} style={{ ...s.btn(preset === k ? "primary" : "ghost"), padding: "6px 12px", fontSize: 12 }}>{l}</button>
+          ))}
+        </div>
+        {preset === "custom" && (
+          <div style={{ ...s.grid2, marginTop: 10 }}>
+            <Field label="From"><input type="date" style={s.input} value={custom[0]} onChange={e => setCustom([e.target.value, custom[1]])} /></Field>
+            <Field label="To"><input type="date" style={s.input} value={custom[1]} onChange={e => setCustom([custom[0], e.target.value])} /></Field>
+          </div>
+        )}
+      </div>
+      <div style={s.card}>
+        <h3 style={s.h3}>Filter by Type</h3>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {TX_TYPES.map(t => <button key={t} onClick={() => toggle(selTypes, setSelTypes, t)} style={{ ...s.btn(selTypes.includes(t) ? "primary" : "ghost"), padding: "6px 12px", fontSize: 12, textTransform: "capitalize" }}>{t}</button>)}
+        </div>
+        <div style={s.divider} />
+        <h3 style={s.h3}>Filter by Account</h3>
+        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+          {accounts.map(a => <button key={a.id} onClick={() => toggle(selAccs, setSelAccs, a.id)} style={{ ...s.btn(selAccs.includes(a.id) ? "primary" : "ghost"), padding: "6px 10px", fontSize: 11 }}>{a.name}</button>)}
+        </div>
+      </div>
+      <div style={s.card}>
+        <h3 style={s.h3}>Summary ({filtered.length} transactions)</h3>
+        <div style={s.grid2}>
+          <div style={{ background: C.green + "15", borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>Income</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: C.green }}>{fmt(totalIncome, "EUR")}</div>
+          </div>
+          <div style={{ background: C.red + "15", borderRadius: 10, padding: 14 }}>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>Expenses</div>
+            <div style={{ fontSize: 20, fontWeight: 700, color: C.red }}>{fmt(totalExpense, "EUR")}</div>
+          </div>
+        </div>
+        <div style={{ marginTop: 10, padding: 14, background: "#ffffff08", borderRadius: 10 }}>
+          <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>Net Balance</div>
+          <div style={{ fontSize: 22, fontWeight: 700, color: (totalIncome - totalExpense) >= 0 ? C.green : C.red }}>{fmt(totalIncome - totalExpense, "EUR")}</div>
+        </div>
+        {(kztExpense > 0 || kztIncome > 0) && (
+          <div style={{ marginTop: 10, padding: 14, background: "#f7a44f15", borderRadius: 10 }}>
+            <div style={{ fontSize: 11, color: C.muted, marginBottom: 4 }}>KZT Subtotal</div>
+            <div style={{ fontSize: 13 }}>
+              <span style={{ color: C.green }}>+{fmt(kztIncome, "KZT")}</span>{" "}
+              <span style={{ color: C.red }}>−{fmt(kztExpense, "KZT")}</span>
+            </div>
+          </div>
+        )}
+      </div>
+      {catList.length > 0 && (
+        <div style={s.card}>
+          <h3 style={s.h3}>Expenses by Category</h3>
+          {catList.map(([cat, val]) => (
+            <div key={cat} style={{ marginBottom: 10 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4, fontSize: 13 }}>
+                <span>{cat}</span><span style={{ color: C.red }}>{fmt(val, "EUR")}</span>
+              </div>
+              <div style={{ height: 6, background: C.border, borderRadius: 3 }}>
+                <div style={{ height: 6, background: C.red, borderRadius: 3, width: `${(val / maxCat) * 100}%` }} />
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── PDF PARSER — Raiffeisenbank CZ statement ──────────────────────────────────
+async function loadPdfJs() {
+  if (window.pdfjsLib) return window.pdfjsLib;
+  await new Promise((res, rej) => {
+    const sc = document.createElement("script");
+    sc.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+    sc.onload = res; sc.onerror = rej;
+    document.head.appendChild(sc);
+  });
+  window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+    "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+  return window.pdfjsLib;
+}
+
+async function extractPdfText(file) {
+  const pdfjsLib = await loadPdfJs();
+  const buf  = await file.arrayBuffer();
+  const pdf  = await pdfjsLib.getDocument({ data: buf }).promise;
+  let text = "";
+  for (let i = 1; i <= pdf.numPages; i++) {
+    const page  = await pdf.getPage(i);
+    const items = (await page.getTextContent()).items;
+    // Preserve approximate line structure via y-position grouping
+    const lines = {};
+    for (const it of items) {
+      const y = Math.round(it.transform[5]);
+      if (!lines[y]) lines[y] = [];
+      lines[y].push(it.str);
+    }
+    Object.keys(lines).sort((a, b) => b - a).forEach(y => {
+      text += lines[y].join(" ") + "\n";
+    });
+  }
+  return text;
+}
+
+function parseRaiffeisenPDF(text, accountId) {
+  const txs = [];
+
+  // Match amount lines: optional minus, digits with spaces/dots as thousands, comma decimal, space, currency
+  // e.g. "-161 668.83 CZK", "8.83 CZK", "-1 457.74 TRY", "718.76 CZK"
+  const amtRe  = /(-?\d[\d\s.]*,?\d*)\s+(CZK|EUR|USD|TRY|PLN|HUF|GBP)/g;
+  // Date pattern: "2. 2. 2026" or "10. 2. 2026"
+  const dateRe = /\b(\d{1,2})\.\s*(\d{1,2})\.\s*(\d{4})\b/;
+
+  const parseAmt = str =>
+    parseFloat(str.replace(/\s/g, "").replace(/\./g, "").replace(",", "."));
+
+  // Income transaction type keywords
+  const incomeTypes = ["příchozí úhrada", "zaevidování jistiny"];
+  // Expense keywords
+  const expenseTypes = ["jednorázová úhrada", "přímé inkaso", "platba kartou", "odchozí", "splátka jistiny", "splátka hypotéky"];
+
+  // Split into blocks by date — each transaction starts with a date line
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+
+  let cur = null;
+
+  const flush = () => {
+    if (!cur) return;
+    // Find CZK amount — prefer it over foreign currency
+    const czk = cur.amounts.find(a => a.cur === "CZK");
+    const any = cur.amounts[0];
+    const chosen = czk || any;
+    if (!chosen) { cur = null; return; }
+
+    const amt  = parseAmt(chosen.val);
+    if (isNaN(amt) || amt === 0) { cur = null; return; }
+
+    // Determine income/expense from transaction type text
+    const typeText = cur.typeText.toLowerCase();
+    let type = amt < 0 ? "expense" : "income";
+    if (incomeTypes.some(k => typeText.includes(k))) type = "income";
+    if (expenseTypes.some(k => typeText.includes(k))) type = "expense";
+
+    txs.push({
+      id: uid(), date: cur.date, accountId,
+      type, amount: Math.abs(amt),
+      currency: chosen.cur,
+      note: cur.note.slice(0, 120),
+      category: "", createdAt: Date.now(), _imported: true,
+    });
+    cur = null;
+  };
+
+  for (const line of lines) {
+    const dateM = line.match(dateRe);
+    // New transaction block starts when line begins with a date
+    if (dateM && line.indexOf(dateM[0]) < 12) {
+      flush();
+      const [, d, m, y] = dateM;
+      cur = {
+        date: `${y}-${m.padStart(2,"0")}-${d.padStart(2,"0")}`,
+        amounts: [], typeText: "", note: "",
+      };
+    }
+    if (!cur) continue;
+
+    // Collect amounts from this line
+    let m; amtRe.lastIndex = 0;
+    while ((m = amtRe.exec(line)) !== null) {
+      cur.amounts.push({ val: m[1], cur: m[2] });
+    }
+
+    // Collect transaction type keywords
+    const lower = line.toLowerCase();
+    if (incomeTypes.some(k => lower.includes(k)) || expenseTypes.some(k => lower.includes(k))) {
+      cur.typeText += " " + line;
+    }
+
+    // Collect note — skip pure numeric/code lines and header-like lines
+    if (!/^\d{10}$/.test(line) && !/^(datum|valuta|kód|strana|raiffeisen|výpis|pořadové)/i.test(line)) {
+      cur.note += (cur.note ? " · " : "") + line;
+    }
+  }
+  flush();
+  return txs;
+}
+
+// ── IMPORT TAB ────────────────────────────────────────────────────────────────
+function CSVImport({ accounts, onImportTxs }) {
+  const [accountId, setAccountId] = useState(accounts[0]?.id || "");
+  const [preview, setPreview]     = useState(null);
+  const [error, setError]         = useState("");
+  const [done, setDone]           = useState(false);
+  const [loading, setLoading]     = useState(false);
+  const acc = accounts.find(a => a.id === accountId);
+
+  async function handleFile(file) {
+    setError(""); setPreview(null); setDone(false); setLoading(true);
+    try {
+      const isPDF = file.name.toLowerCase().endsWith(".pdf") || file.type === "application/pdf";
+
+      if (isPDF) {
+        const text   = await extractPdfText(file);
+        const parsed = parseRaiffeisenPDF(text, accountId);
+        if (!parsed.length) { setError("No transactions found in PDF. Make sure this is a Raiffeisenbank CZ statement."); return; }
+        setPreview({ bank: "raiffeisenbank_pdf", parsed });
+        return;
+      }
+
+      // CSV path
+      const rows = parseCSV(await file.text());
+      if (!rows.length) { setError("No rows found in file."); return; }
+      const headers = Object.keys(rows[0]);
+      const bank    = detectBank(headers);
+      if (!bank) { setError(`Unknown CSV format. Headers: ${headers.join(", ")}`); return; }
+      const parsed  = parseBank(bank, rows, accountId, acc?.currency || "KZT");
+      if (!parsed) { setError("Failed to parse file."); return; }
+      setPreview({ bank, parsed });
+    } catch(e) {
+      setError("Failed to read file: " + e.message);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function confirmImport() {
+    for (const tx of preview.parsed) await dbPut("transactions", tx.id, tx);
+    onImportTxs(preview.parsed);
+    setPreview(null); setDone(true);
+  }
+
+  const ALL_BANK_LABELS = {
+    ...BANK_LABELS,
+    raiffeisenbank_pdf: "Raiffeisenbank CZ (PDF statement)",
+  };
+
+  return (
+    <div style={s.card}>
+      <h2 style={s.h2}>Import</h2>
+      <Field label="Import into Account">
+        <select style={s.select} value={accountId} onChange={e => { setAccountId(e.target.value); setPreview(null); setDone(false); }}>
+          {accounts.map(a => <option key={a.id} value={a.id}>{a.name} ({a.currency})</option>)}
+        </select>
+      </Field>
+      <Field label="File (CSV or PDF)">
+        <label style={{ ...s.btn(), background: "#2a2a2a", color: C.text, cursor: "pointer", display: "inline-block", padding: "10px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600 }}>
+          {loading ? "Parsing…" : "Choose File"}
+          <input type="file" accept=".csv,.txt,.pdf" style={{ display: "none" }} onChange={e => handleFile(e.target.files[0])} disabled={loading} />
+        </label>
+      </Field>
+      {error && <div style={{ color: C.red, fontSize: 12, background: C.red + "15", padding: 10, borderRadius: 8 }}>{error}</div>}
+      {preview && (
+        <div>
+          <div style={{ background: C.accent + "15", borderRadius: 8, padding: 10, marginBottom: 10 }}>
+            <div style={{ fontSize: 12, color: C.accent, fontWeight: 600 }}>✓ Detected: {ALL_BANK_LABELS[preview.bank]}</div>
+            <div style={{ fontSize: 12, color: C.muted, marginTop: 2 }}>{preview.parsed.length} transactions → <strong style={{ color: C.text }}>{acc?.name}</strong></div>
+          </div>
+          <div style={{ overflowX: "auto", marginBottom: 10 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${C.border}` }}>
+                  {["Date","Type","Amount","Currency","Note"].map(h => <th key={h} style={{ textAlign: "left", padding: "4px 8px", color: C.muted, fontWeight: 500 }}>{h}</th>)}
+                </tr>
+              </thead>
+              <tbody>
+                {preview.parsed.slice(0, 8).map((tx, i) => (
+                  <tr key={i} style={{ borderBottom: `1px solid ${C.border}` }}>
+                    <td style={{ padding: "4px 8px" }}>{tx.date}</td>
+                    <td style={{ padding: "4px 8px" }}><TypeBadge type={tx.type} /></td>
+                    <td style={{ padding: "4px 8px", color: tx.type === "income" ? C.green : C.red }}>{fmt(tx.amount, tx.currency)}</td>
+                    <td style={{ padding: "4px 8px", color: C.muted }}>{tx.currency}</td>
+                    <td style={{ padding: "4px 8px", color: C.muted, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{tx.note}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {preview.parsed.length > 8 && <div style={{ fontSize: 11, color: C.muted, padding: "4px 8px" }}>…and {preview.parsed.length - 8} more</div>}
+          </div>
+          <div style={s.row}>
+            <button style={s.btn("primary")} onClick={confirmImport}>Import {preview.parsed.length} Transactions</button>
+            <button style={s.btn("ghost")} onClick={() => setPreview(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
+      {done && <div style={{ color: C.green, fontSize: 13, marginTop: 8 }}>✓ Import complete!</div>}
+      <div style={s.divider} />
+      <div style={{ fontSize: 11, color: C.muted }}>
+        <strong style={{ color: C.text }}>Supported formats:</strong><br />
+        • Revolut — English, Czech, and Savings exports (CSV)<br />
+        • Raiffeisenbank CZ — CSV export or PDF statement<br />
+        • Generic KZ banks with Debit/Credit columns (CSV)
+      </div>
+    </div>
+  );
+}
+
+// ── SETTINGS ──────────────────────────────────────────────────────────────────
+function Settings({ accounts, setAccounts, expCats, setExpCats, incCats, setIncCats, onExport, onImport, driveHook, onDrivePull, getExportData }) {
+  const { status, connect, push, pull, msg } = driveHook;
+  const [newAcc,    setNewAcc]    = useState({ name: "", currency: "EUR", color: "#4f8ef7" });
+  const [newExpCat, setNewExpCat] = useState("");
+  const [newIncCat, setNewIncCat] = useState("");
+  const [clientId,  setClientId]  = useState(() => { try { return localStorage.getItem("gClientId") || ""; } catch { return ""; } });
+
+  const saveClientId = v => { setClientId(v); try { localStorage.setItem("gClientId", v); } catch {} };
+
+  async function addAccount() {
+    if (!newAcc.name) return;
+    const updated = [...accounts, { ...newAcc, id: uid() }];
+    setAccounts(updated); await dbPut("settings", "accounts", updated);
+    setNewAcc({ name: "", currency: "EUR", color: "#4f8ef7" });
+  }
+
+  async function removeAccount(id) {
+    const updated = accounts.filter(a => a.id !== id);
+    setAccounts(updated); await dbPut("settings", "accounts", updated);
+  }
+
+  async function addCat(type) {
+    const val = type === "exp" ? newExpCat : newIncCat;
+    if (!val.trim()) return;
+    if (type === "exp") { const u = [...expCats, val.trim()]; setExpCats(u); await dbPut("settings", "expCats", u); setNewExpCat(""); }
+    else               { const u = [...incCats,  val.trim()]; setIncCats(u); await dbPut("settings", "incCats", u); setNewIncCat(""); }
+  }
+
+  async function removeCat(type, cat) {
+    if (type === "exp") { const u = expCats.filter(c => c !== cat); setExpCats(u); await dbPut("settings", "expCats", u); }
+    else               { const u = incCats.filter(c => c !== cat);  setIncCats(u); await dbPut("settings", "incCats", u); }
+  }
+
+  return (
+    <div>
+      <div style={s.card}>
+        <h3 style={s.h3}>Google Drive Sync</h3>
+        <Field label="Google OAuth Client ID">
+          <input style={s.input} placeholder="123456789-abc….apps.googleusercontent.com" value={clientId} onChange={e => saveClientId(e.target.value)} />
+        </Field>
+        <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>
+          Get from <strong style={{ color: C.text }}>console.cloud.google.com</strong> → Credentials → OAuth 2.0 Client ID.<br />
+          Authorized JS origin: <strong style={{ color: C.text }}>{typeof window !== "undefined" ? window.location.origin : ""}</strong>
+        </div>
+        <div style={s.row}>
+          {status !== "connected"
+            ? <button style={s.btn("primary")} onClick={() => connect(clientId)}>Connect Google Drive</button>
+            : <>
+                <button style={s.btn("primary")} onClick={() => push(getExportData())}>⬆ Push to Drive</button>
+                <button style={{ ...s.btn(), background: "#2a2a2a", color: C.text }} onClick={async () => { const d = await pull(); if (d) onDrivePull(d); }}>⬇ Pull from Drive</button>
+              </>
+          }
+        </div>
+        {msg && <div style={{ fontSize: 12, color: status === "error" ? C.red : C.green, marginTop: 8 }}>{msg}</div>}
+      </div>
+      <div style={s.card}>
+        <h3 style={s.h3}>Data</h3>
+        <div style={s.row}>
+          <button style={s.btn("primary")} onClick={onExport}>⬇ Export JSON</button>
+          <label style={{ ...s.btn(), background: "#2a2a2a", color: C.muted, cursor: "pointer", padding: "10px 18px", borderRadius: 8, fontSize: 13, fontWeight: 600 }}>
+            ⬆ Import JSON<input type="file" accept=".json" style={{ display: "none" }} onChange={e => onImport(e.target.files[0])} />
+          </label>
+        </div>
+      </div>
+      <div style={s.card}>
+        <h3 style={s.h3}>Accounts</h3>
+        {accounts.map(a => (
+          <div key={a.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${C.border}` }}>
+            <div style={s.row}><span style={s.badge(a.color)} /><span style={{ fontSize: 13 }}>{a.name}</span><span style={{ color: C.muted, fontSize: 11 }}>({a.currency})</span></div>
+            <button onClick={() => removeAccount(a.id)} style={{ background: "none", border: "none", color: C.muted, cursor: "pointer" }}>✕</button>
+          </div>
+        ))}
+        <div style={{ ...s.row, marginTop: 12 }}>
+          <input style={{ ...s.input, flex: 2 }} placeholder="Account name" value={newAcc.name} onChange={e => setNewAcc(p => ({ ...p, name: e.target.value }))} />
+          <select style={{ ...s.select, flex: 1 }} value={newAcc.currency} onChange={e => setNewAcc(p => ({ ...p, currency: e.target.value }))}>
+            {CURRENCIES.map(c => <option key={c}>{c}</option>)}
+          </select>
+          <input type="color" value={newAcc.color} onChange={e => setNewAcc(p => ({ ...p, color: e.target.value }))} style={{ width: 36, height: 36, borderRadius: 6, border: "none", cursor: "pointer" }} />
+          <button style={s.btn("primary")} onClick={addAccount}>Add</button>
+        </div>
+      </div>
+      {[["Expense Categories", expCats, setExpCats, "exp", C.red, newExpCat, setNewExpCat],
+        ["Income Categories",  incCats, setIncCats,  "inc", C.green, newIncCat, setNewIncCat]
+       ].map(([title, cats, , type, color, newVal, setNew]) => (
+        <div key={title} style={s.card}>
+          <h3 style={s.h3}>{title}</h3>
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 10 }}>
+            {cats.map(c => <span key={c} style={{ ...s.chip(color), cursor: "pointer" }} onClick={() => removeCat(type, c)}>{c} ✕</span>)}
+          </div>
+          <div style={s.row}>
+            <input style={s.input} placeholder="New category…" value={newVal} onChange={e => setNew(e.target.value)} onKeyDown={e => e.key === "Enter" && addCat(type)} />
+            <button style={s.btn("primary")} onClick={() => addCat(type)}>Add</button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ── APP ROOT ──────────────────────────────────────────────────────────────────
+export default function App() {
+  const [tab,          setTab]         = useState("add");
+  const [transactions, setTransactions] = useState([]);
+  const [accounts,     setAccounts]    = useState(DEFAULT_ACCOUNTS);
+  const [expCats,      setExpCats]     = useState(DEFAULT_EXP_CATS);
+  const [incCats,      setIncCats]     = useState(DEFAULT_INC_CATS);
+  const [loaded,       setLoaded]      = useState(false);
+
+  useEffect(() => {
+    (async () => {
+      setTransactions(await dbGetAll("transactions"));
+      const accs = await dbGet("settings", "accounts"); if (accs) setAccounts(accs);
+      const ec   = await dbGet("settings", "expCats");  if (ec)   setExpCats(ec);
+      const ic   = await dbGet("settings", "incCats");  if (ic)   setIncCats(ic);
+      setLoaded(true);
+    })();
+  }, []);
+
+  const driveHook = useGoogleDrive();
+
+  const getExportData = () => ({ transactions, accounts, expCats, incCats, exportedAt: new Date().toISOString() });
+
+  const onSave = useCallback(tx => setTransactions(p => [tx, ...p]), []);
+  const onDelete = useCallback(async id => {
+    await dbDelete("transactions", id);
+    setTransactions(p => p.filter(t => t.id !== id));
+  }, []);
+
+  async function onDrivePull(data) {
+    if (data.transactions) { for (const tx of data.transactions) await dbPut("transactions", tx.id, tx); setTransactions(data.transactions); }
+    if (data.accounts)  { setAccounts(data.accounts);  await dbPut("settings", "accounts", data.accounts); }
+    if (data.expCats)   { setExpCats(data.expCats);    await dbPut("settings", "expCats",  data.expCats); }
+    if (data.incCats)   { setIncCats(data.incCats);    await dbPut("settings", "incCats",  data.incCats); }
+  }
+
+  function onExport() {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob([JSON.stringify(getExportData(), null, 2)], { type: "application/json" }));
+    a.download = `finance-${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+  }
+
+  async function onImport(file) {
+    if (!file) return;
+    try {
+      const d = JSON.parse(await file.text());
+      await onDrivePull(d);
+      alert("Imported successfully!");
+    } catch { alert("Invalid file."); }
+  }
+
+  const TABS = [["add","＋ Add"],["accounts","Accounts"],["txs","History"],["reports","Reports"],["import","Import"],["settings","Settings"]];
+
+  if (!loaded) return <div style={{ ...s.app, display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" }}>Loading…</div>;
+
+  return (
+    <div style={s.app}>
+      <nav style={s.nav}>
+        {TABS.map(([k, l]) => <button key={k} style={s.navBtn(tab === k)} onClick={() => setTab(k)}>{l}</button>)}
+      </nav>
+      <div style={s.page}>
+        {tab === "add"      && <AddTransaction accounts={accounts} expCats={expCats} incCats={incCats} onSave={onSave} />}
+        {tab === "accounts" && <AccountsView accounts={accounts} transactions={transactions} />}
+        {tab === "txs"      && <TransactionsList transactions={transactions} accounts={accounts} onDelete={onDelete} />}
+        {tab === "reports"  && <Reports transactions={transactions} accounts={accounts} expCats={expCats} incCats={incCats} />}
+        {tab === "import"   && <CSVImport accounts={accounts} onImportTxs={txs => setTransactions(p => [...p, ...txs])} />}
+        {tab === "settings" && <Settings accounts={accounts} setAccounts={setAccounts} expCats={expCats} setExpCats={setExpCats} incCats={incCats} setIncCats={setIncCats} onExport={onExport} onImport={onImport} driveHook={driveHook} onDrivePull={onDrivePull} getExportData={getExportData} />}
+      </div>
+    </div>
+  );
+}
