@@ -692,23 +692,58 @@
       function connect(clientId) {
         if (!clientId) { setMsg("Enter your Google OAuth Client ID first."); return; }
         setStatus("connecting");
+        setMsg("Waiting for Google sign-in…");
+        const redirectUri = window.location.origin + window.location.pathname;
         const params = new URLSearchParams({
-          client_id: clientId, redirect_uri: window.location.origin + window.location.pathname,
+          client_id: clientId, redirect_uri: redirectUri,
           response_type: "token", scope: DRIVE_SCOPE, prompt: "select_account",
         });
         const popup = window.open(`https://accounts.google.com/o/oauth2/v2/auth?${params}`, "oauth", "width=500,height=600");
+        let resolved = false;
+
         const timer = setInterval(() => {
           try {
             const url = popup?.location?.href || "";
             if (url.includes("access_token")) {
+              resolved = true;
               clearInterval(timer);
               popup.close();
               const hash = new URLSearchParams(url.split("#")[1]);
-              setToken(hash.get("access_token")); setStatus("connected"); setMsg("Connected to Google Drive ✓");
+              const tok = hash.get("access_token");
+              const err = hash.get("error");
+              if (err) {
+                setStatus("idle");
+                setMsg(`Auth error: ${err}`);
+              } else if (tok) {
+                setToken(tok); setStatus("connected"); setMsg("Connected to Google Drive ✓");
+              }
+              return;
             }
-            if (popup?.closed && status === "connecting") { clearInterval(timer); setStatus("idle"); setMsg("Cancelled."); }
+            // Catch Google error pages (400, 403, etc.)
+            if (url.includes("accounts.google.com") && url.includes("error=")) {
+              resolved = true;
+              clearInterval(timer);
+              const errParam = new URLSearchParams(url.split("?")[1]).get("error");
+              popup.close();
+              setStatus("idle");
+              const errorMessages = {
+                "access_denied":        "Access denied — you cancelled or denied permission.",
+                "redirect_uri_mismatch":"Redirect URI mismatch — check Authorized redirect URIs in Google Cloud.",
+                "org_internal":         "App is restricted to internal users — set OAuth consent screen to External.",
+                "invalid_client":       "Invalid Client ID — double-check the value in Settings.",
+                "invalid_scope":        "Invalid scope — this is a bug, please report it.",
+              };
+              setMsg(errorMessages[errParam] || `Google error: ${errParam}`);
+              return;
+            }
           } catch {}
-        }, 500);
+
+          if (popup?.closed && !resolved) {
+            clearInterval(timer);
+            setStatus("idle");
+            setMsg("Sign-in window closed — please try again.");
+          }
+        }, 300);
       }
 
       async function findFile(tok) {
