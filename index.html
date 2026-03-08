@@ -212,7 +212,7 @@
     };
 
     // ── GOOGLE DRIVE ──────────────────────────────────────────────────────────
-    const DRIVE_SCOPE     = "https://www.googleapis.com/auth/drive.appdata";
+    const DRIVE_SCOPE     = "https://www.googleapis.com/auth/drive.file";
     const DRIVE_FILE_NAME = "finance-tracker.json";
 
     function useGoogleDrive() {
@@ -256,7 +256,7 @@
       }
 
       async function findFile(tok) {
-        const r = await fetch("https://www.googleapis.com/drive/v3/files?spaces=appDataFolder&fields=files(id,name,modifiedTime)&q=name%3D%27finance-tracker.json%27", { headers: { Authorization: `Bearer ${tok}` } });
+        const r = await fetch("https://www.googleapis.com/drive/v3/files?spaces=drive&fields=files(id,name,modifiedTime)&q=name%3D%27finance-tracker.json%27+and+trashed%3Dfalse", { headers: { Authorization: `Bearer ${tok}` } });
         return (await r.json()).files[0] || null;
       }
 
@@ -270,7 +270,7 @@
           if (existing) {
             url = `https://www.googleapis.com/upload/drive/v3/files/${existing.id}?uploadType=media`; method = "PATCH";
           } else {
-            const meta = await fetch("https://www.googleapis.com/drive/v3/files", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ name: DRIVE_FILE_NAME, parents: ["appDataFolder"] }) });
+            const meta = await fetch("https://www.googleapis.com/drive/v3/files", { method: "POST", headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: JSON.stringify({ name: DRIVE_FILE_NAME, mimeType: "application/json" }) });
             url = `https://www.googleapis.com/upload/drive/v3/files/${(await meta.json()).id}?uploadType=media`; method = "PATCH";
           }
           await fetch(url, { method, headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" }, body: payload });
